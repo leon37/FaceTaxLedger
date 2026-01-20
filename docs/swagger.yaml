@@ -1,0 +1,315 @@
+basePath: /api/v1
+definitions:
+  controller.DeleteRequest:
+    properties:
+      id:
+        type: integer
+    required:
+    - id
+    type: object
+  controller.ExpenseAnalyzeRequest:
+    properties:
+      description:
+        type: string
+    required:
+    - description
+    type: object
+  controller.ExpenseAnalyzeResponse:
+    properties:
+      amount:
+        type: number
+      category:
+        type: string
+      comment:
+        type: string
+      date:
+        type: string
+      id:
+        type: string
+      note:
+        type: string
+    type: object
+  controller.ListRequest:
+    properties:
+      category:
+        type: string
+      end_date:
+        type: string
+      page:
+        type: integer
+      page_size:
+        type: integer
+      start_date:
+        description: 格式 2023-01-01
+        type: string
+    type: object
+  controller.ListResponse:
+    properties:
+      list:
+        items:
+          $ref: '#/definitions/model.ExpenseEntity'
+        type: array
+      page:
+        type: integer
+      total:
+        type: integer
+    type: object
+  controller.LoginRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    required:
+    - email
+    - password
+    type: object
+  controller.LoginResponse:
+    properties:
+      token:
+        type: string
+      user_id:
+        type: string
+    type: object
+  controller.RegisterRequest:
+    properties:
+      email:
+        type: string
+      password:
+        minLength: 6
+        type: string
+      username:
+        maxLength: 100
+        minLength: 2
+        type: string
+    required:
+    - email
+    - password
+    - username
+    type: object
+  controller.UpdateRequest:
+    properties:
+      amount:
+        type: number
+      category:
+        type: string
+      date:
+        type: string
+      id:
+        type: integer
+      note:
+        type: string
+    required:
+    - id
+    type: object
+  model.ExpenseEntity:
+    properties:
+      amount:
+        type: number
+      category:
+        type: string
+      comment:
+        type: string
+      created_at:
+        type: string
+      id:
+        type: integer
+      note:
+        type: string
+      updated_at:
+        type: string
+      user_id:
+        description: 输入数据
+        type: string
+    type: object
+  response.Response:
+    properties:
+      code:
+        description: 0 代表成功，非 0 代表错误码
+        type: integer
+      data:
+        description: 数据载荷
+      msg:
+        description: 提示信息
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@swagger.io
+    name: API Support
+    url: http://www.swagger.io/support
+  description: 基于 Go + Gin + Qdrant 的 AI 智能记账系统
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  termsOfService: http://swagger.io/terms/
+  title: FaceTax API
+  version: "1.0"
+paths:
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: 校验账号密码，颁发 JWT Token
+      parameters:
+      - description: 登录参数
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/controller.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 包含 Token 和 UserID
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/controller.LoginResponse'
+              type: object
+      summary: 用户登录
+      tags:
+      - Auth
+  /auth/register:
+    post:
+      consumes:
+      - application/json
+      description: 创建新用户，密码加密存储
+      parameters:
+      - description: 注册参数
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/controller.RegisterRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Code=0 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+        "400":
+          description: 参数错误
+          schema:
+            $ref: '#/definitions/response.Response'
+      summary: 用户注册
+      tags:
+      - Auth
+  /expenses:
+    get:
+      consumes:
+      - application/json
+      description: 按条件筛选账单
+      parameters:
+      - description: 筛选条件
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/controller.ListRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 注意：这里加上了 controller. 前缀
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/controller.ListResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: 获取记账列表
+      tags:
+      - Expense
+  /expenses/analyze:
+    post:
+      consumes:
+      - application/json
+      description: AI 自动提取金额、分类并生成吐槽。
+      parameters:
+      - description: 记账内容
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/controller.ExpenseAnalyzeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/controller.ExpenseAnalyzeResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: 自然语言记账
+      tags:
+      - Expense
+  /expenses/delete:
+    post:
+      consumes:
+      - application/json
+      description: 删除已存在的账单信息，仅限本人操作
+      parameters:
+      - description: 删除参数
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/controller.DeleteRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 删除账本条目
+      tags:
+      - Expense
+  /expenses/update:
+    post:
+      consumes:
+      - application/json
+      description: 修改已存在的账单信息，仅限本人操作
+      parameters:
+      - description: 更新参数
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/controller.UpdateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            $ref: '#/definitions/response.Response'
+      security:
+      - BearerAuth: []
+      summary: 更新账本条目
+      tags:
+      - Expense
+securityDefinitions:
+  BearerAuth:
+    description: 请在输入框中输入 "Bearer <token>" (注意 Bearer 和 token 之间有空格)
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
