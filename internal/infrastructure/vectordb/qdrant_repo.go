@@ -3,57 +3,51 @@ package vectordb
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/leon37/FaceTaxLedger/internal/infrastructure/embedding"
 	"github.com/leon37/FaceTaxLedger/internal/repository"
 	pb "github.com/qdrant/go-client/qdrant"
 	"log"
+	"log/slog"
+	"time"
 )
 
 type QdrantRepository struct {
-	client   *QdrantClient // 持有我们在上一节写的底层 client
-	embedder embedding.Provider
+	client *QdrantClient // 持有我们在上一节写的底层 client
+
 }
 
-func (r *QdrantRepository) SaveMemory(ctx context.Context, uid string, expenseID uint, description string) error {
-	// 1. 将文本转化为向量 (调用 Embedding API)
-	vec, err := r.embedder.GetVector(ctx, description)
-	if err != nil {
-		return fmt.Errorf("failed to vectorize text: %v", err)
-	}
+func (r *QdrantRepository) SaveMemory(ctx context.Context, uid string, expenseID uint, description string, vector []float32) error {
 
 	// 2. 构造 Qdrant Point
-	// Point ID 这里我们临时生成一个 UUID，或者你可以复用 expenseID (需要转 uint64)
-	// 为了简单，我们这里用 UUID 字符串作为 Point ID
-	pointID := uuid.New().String()
 
 	points := []*pb.PointStruct{
 		{
 			Id: &pb.PointId{
-				PointIdOptions: &pb.PointId_Uuid{Uuid: pointID},
+				PointIdOptions: &pb.PointId_Num{Num: uint64(expenseID)},
 			},
 			Vectors: &pb.Vectors{
 				VectorsOptions: &pb.Vectors_Vector{
-					Vector: &pb.Vector{Data: vec},
+					Vector: &pb.Vector{Data: vector},
 				},
 			},
 			Payload: map[string]*pb.Value{
 				"user_id":     {Kind: &pb.Value_StringValue{StringValue: uid}},
 				"expense_id":  {Kind: &pb.Value_IntegerValue{IntegerValue: int64(expenseID)}},
 				"description": {Kind: &pb.Value_StringValue{StringValue: description}},
+				"timestamp":   {Kind: &pb.Value_IntegerValue{IntegerValue: time.Now().Unix()}},
 			},
 		},
 	}
 
 	wait := true
 	// 3. Upsert 入库
-	_, err = r.client.points.Upsert(ctx, &pb.UpsertPoints{
+	_, err := r.client.points.Upsert(ctx, &pb.UpsertPoints{
 		CollectionName: CollectionName,
 		Points:         points,
 		Wait:           &wait,
 	})
 
 	if err != nil {
+		slog.Error("qdrant upsert failed: %v", err)
 		return fmt.Errorf("qdrant upsert failed: %v", err)
 	}
 
@@ -61,13 +55,7 @@ func (r *QdrantRepository) SaveMemory(ctx context.Context, uid string, expenseID
 	return nil
 }
 
-func (r *QdrantRepository) SearchSimilar(ctx context.Context, uid string, description string, limit int) ([]string, error) {
-	// 1. 将查询文本转化为向量
-	queryVector, err := r.embedder.GetVector(ctx, description)
-	if err != nil {
-		return nil, fmt.Errorf("embedding failed: %v", err)
-	}
-
+func (r *QdrantRepository) SearchSimilar(ctx context.Context, uid string, limit int, queryVector []float32) ([]repository.MemoryResult, error) {
 	condition := &pb.Condition_Field{
 		Field: &pb.FieldCondition{
 			Key: "user_id", // Qdrant 中的字段名
@@ -97,12 +85,15 @@ func (r *QdrantRepository) SearchSimilar(ctx context.Context, uid string, descri
 		},
 	})
 	if err != nil {
+		slog.Error("qdrant search failed: %v", err)
 		return nil, fmt.Errorf("qdrant search failed: %v", err)
 	}
 
 	// 3. 提取结果中的文本
-	var histories []string
+	var histories []repository.MemoryResult
 	for _, point := range searchResult.Result {
+		var content string
+		var ts int64
 		// point.Score 是相似度分数，你可以选择过滤掉分数太低的（比如 < 0.7）
 		// 这里暂不设限，全部通过
 
@@ -111,18 +102,41 @@ func (r *QdrantRepository) SearchSimilar(ctx context.Context, uid string, descri
 			// 使用 Type Assertion 提取 StringValue
 			// Protobuf 的 Value 结构很深: Value -> Kind(oneof) -> StringValue
 			if strVal, ok := val.Kind.(*pb.Value_StringValue); ok {
-				histories = append(histories, strVal.StringValue)
+				content = strVal.StringValue
 			}
 		}
+		if t, ok := point.Payload["timestamp"]; ok {
+			ts = t.GetIntegerValue()
+		}
+		histories = append(histories, repository.MemoryResult{
+			Content:   content,
+			Timestamp: ts,
+		})
+
 	}
 
 	return histories, nil
 }
 
+func (r *QdrantRepository) Delete(ctx context.Context, id int64) error {
+	_, err := r.client.points.Delete(ctx, &pb.DeletePoints{
+		CollectionName: CollectionName,
+		Points: &pb.PointsSelector{
+			PointsSelectorOneOf: &pb.PointsSelector_Points{
+				Points: &pb.PointsIdsList{
+					Ids: []*pb.PointId{
+						{PointIdOptions: &pb.PointId_Num{Num: uint64(id)}}, // 指定要删除的 ID
+					},
+				},
+			},
+		},
+	})
+	return err
+}
+
 // NewQdrantRepository 构造函数
-func NewQdrantRepository(client *QdrantClient, embedder embedding.Provider) repository.MemoryRepo {
+func NewQdrantRepository(client *QdrantClient) repository.MemoryRepo {
 	return &QdrantRepository{
-		client:   client,
-		embedder: embedder,
+		client: client,
 	}
 }

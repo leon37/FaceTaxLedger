@@ -24,6 +24,10 @@ func NewMySQLConnection(dsn string) *gorm.DB {
 		log.Fatalf("Fatal: 数据库迁移失败: %v", err)
 	}
 
+	if err = db.AutoMigrate(&model.User{}); err != nil {
+		log.Fatalf("Fatal: 数据库迁移失败: %v", err)
+	}
+
 	sqlDB, _ := db.DB()
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetMaxOpenConns(100)

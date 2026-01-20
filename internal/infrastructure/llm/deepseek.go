@@ -65,7 +65,9 @@ func (c *DeepSeekClient) AnalyzeExpense(ctx context.Context, userInput string) (
 	reqBody := chatRequest{
 		Model: c.modelName,
 		Messages: []message{
-			{Role: "system", Content: model.SystemPrompt}, // 注入我们在 Context 中定义的 Prompt
+			{Role: "system", Content: fmt.Sprintf(model.SystemPrompt,
+				time.Now().Format("2006-01-02 15:04:05"),
+				model.GetCategoryPrompt())}, // 注入我们在 Context 中定义的 Prompt
 			{Role: "user", Content: userInput},
 		},
 		// 关键点：启用 JSON Mode，这能极大提高模型输出 JSON 的稳定性

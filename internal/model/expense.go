@@ -14,15 +14,12 @@ type ExpenseEntity struct {
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
 	// 输入数据
-	UserID      string  `gorm:"type:varchar(64);index" json:"user_id"`
-	Amount      float64 `gorm:"type:decimal(10,2)" json:"amount"`
-	Description string  `gorm:"type:text" json:"description"`
+	UserID string  `gorm:"type:varchar(64);index" json:"user_id"`
+	Amount float64 `gorm:"type:decimal(10,2)" json:"amount"`
 
-	// AI 分析结果 (把 FaceTaxAnalysis 拍平存进去)
-	IsFaceTax    bool   `json:"is_face_tax"`
-	TaxCategory  string `gorm:"type:varchar(64)" json:"tax_category"`
-	Comment      string `gorm:"type:text" json:"comment"`
-	SarcasmLevel int    `json:"sarcasm_level"`
+	Comment  string `gorm:"type:text" json:"comment"`
+	Category string `gorm:"type:varchar(64)" json:"category"`
+	Note     string `gorm:"type:text" json:"note"`
 }
 
 // TableName 强制指定表名
