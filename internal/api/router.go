@@ -17,7 +17,7 @@ func RegisterRoutes(r *gin.Engine, authCtrl *controller.AuthController, expenseC
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-
+	r.Use(middleware.Cors())
 	public := r.Group("/api/v1/auth")
 	{
 		public.POST("/register", authCtrl.Register)
