@@ -1,19 +1,14 @@
 package embedding
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"time"
+	"github.com/sashabaranov/go-openai"
 )
 
 type OpenAIClient struct {
-	apiKey  string
-	baseURL string // 例如 "https://api.openai.com/v1" 或其它中转地址
-	model   string // 例如 "text-embedding-3-small"
+	model  string // 例如 "text-embedding-3-small"
+	client *openai.Client
 }
 
 func NewOpenAIClient(apiKey, baseURL, model string) *OpenAIClient {
@@ -23,10 +18,11 @@ func NewOpenAIClient(apiKey, baseURL, model string) *OpenAIClient {
 	if model == "" {
 		model = "text-embedding-3-small" // 默认模型，维度 1536
 	}
+	config := openai.DefaultConfig(apiKey)
+	config.BaseURL = baseURL
 	return &OpenAIClient{
-		apiKey:  apiKey,
-		baseURL: baseURL,
-		model:   model,
+		model:  model,
+		client: openai.NewClientWithConfig(config),
 	}
 }
 
@@ -47,42 +43,23 @@ type embeddingResponse struct {
 }
 
 func (c *OpenAIClient) GetVector(ctx context.Context, text string) ([]float32, error) {
-	reqBody := embeddingRequest{
-		Input: text,
-		Model: c.model,
+	req := openai.EmbeddingRequest{
+		Input: []string{text},
+		// 如果 c.model 是字符串，可以强转，或者直接使用 openai.SmallEmbedding3 等常量
+		Model: openai.EmbeddingModel(c.model),
 	}
-	jsonData, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/embeddings", c.baseURL)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	// 发起请求
+	resp, err := c.client.CreateEmbeddings(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("openai embedding failed: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("embedding api error: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var apiResp embeddingResponse
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, err
-	}
-
-	if len(apiResp.Data) == 0 {
+	// 校验返回数据
+	if len(resp.Data) == 0 {
 		return nil, fmt.Errorf("empty embedding data returned")
 	}
 
-	return apiResp.Data[0].Embedding, nil
+	// 返回第一个结果的向量
+	return resp.Data[0].Embedding, nil
 }

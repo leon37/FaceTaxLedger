@@ -1,23 +1,18 @@
 package llm
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/leon37/FaceTaxLedger/internal/model"
+	"github.com/sashabaranov/go-openai"
 	"io"
-	"net/http"
-	"strings"
+	"log/slog"
 	"time"
 )
 
 type DeepSeekClient struct {
-	apiKey     string
-	apiURL     string
-	httpClient *http.Client
-	modelName  string
+	modelName string
+	client    *openai.Client
 }
 
 // OpenAI 兼容的请求结构
@@ -49,88 +44,92 @@ type chatResponse struct {
 	} `json:"error,omitempty"`
 }
 
-func NewDeepSeekClient(apiKey string) *DeepSeekClient {
+func NewDeepSeekClient(apiKey, baseUrl, modelName string) *DeepSeekClient {
+	config := openai.DefaultConfig(apiKey)
+	config.BaseURL = baseUrl
+
 	return &DeepSeekClient{
-		apiKey:    apiKey,
-		apiURL:    "https://api.deepseek.com/chat/completions", // DeepSeek V3/R1 官方端点
-		modelName: "deepseek-chat",                             // 或者 deepseek-reasoner
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second, // 务必设置超时，防止 Goroutine 泄漏
-		},
+		modelName: modelName,
+		client:    openai.NewClientWithConfig(config),
 	}
 }
 
-func (c *DeepSeekClient) AnalyzeExpense(ctx context.Context, userInput string) (*model.FaceTaxAnalysis, error) {
-	// 1. 构建请求 Payload
-	reqBody := chatRequest{
-		Model: c.modelName,
-		Messages: []message{
-			{Role: "system", Content: fmt.Sprintf(model.SystemPrompt,
-				time.Now().Format("2006-01-02 15:04:05"),
-				model.GetCategoryPrompt())}, // 注入我们在 Context 中定义的 Prompt
-			{Role: "user", Content: userInput},
+func (d *DeepSeekClient) AnalyzeExpense(ctx context.Context, userContext string, categories []string, historyContext []string, enableRoast bool) (<-chan string, error) {
+	// 1. 构建 System Prompt
+	sysPrompt := fmt.Sprintf("你是一个专业的记账助手。当前系统时间：%s。", time.Now().Format("2006-01-02 15:04:05"))
+	var contextInstruction string
+
+	if len(historyContext) > 0 {
+		// 拼接历史记录字符串
+		historyStr := "\n\n【用户相关历史消费参考】:\n"
+		for _, log := range historyContext {
+			historyStr += fmt.Sprintf("- %s\n", log)
+		}
+
+		if enableRoast {
+			// === 场景 A: 开启吐槽 ===
+			// 指令：用历史数据来攻击
+			contextInstruction = historyStr + "\n请结合上述历史行为，如果发现用户在短时间内重复消费或有不良消费习惯，请在 comment 字段中加大力度进行辛辣、幽默的吐槽。"
+		} else {
+			// === 场景 B: 关闭吐槽 (纯记账模式) ===
+			// 指令：用历史数据来校准分类
+			contextInstruction = historyStr + "\n请参考上述历史消费的'分类'和'备注'习惯。如果当前消费与历史记录相似，请优先保持分类一致性。请忽略情感色彩，不要输出 comment。"
+		}
+	} else {
+		if enableRoast {
+			contextInstruction += "\n【重要指令】\n请务必在 'comment' 字段中填入一句简短、辛辣、幽默的吐槽（毒舌风格）。"
+		} else {
+			contextInstruction += "\n【重要指令】\n'comment' 字段是必填项，但请务必填入空字符串 \"\"，不要输出任何内容。"
+		}
+	}
+	finalSystemPrompt := sysPrompt + contextInstruction
+
+	req := openai.ChatCompletionRequest{
+		Model: d.modelName,
+		Messages: []openai.ChatCompletionMessage{
+			{Role: openai.ChatMessageRoleSystem, Content: finalSystemPrompt},
+			{Role: openai.ChatMessageRoleUser, Content: userContext},
 		},
-		// 关键点：启用 JSON Mode，这能极大提高模型输出 JSON 的稳定性
-		ResponseFormat: format{Type: "json_object"},
-		Temperature:    1.3, // 稍微高一点，让毒舌更有创意
+		// 注入动态工具
+		Tools: []openai.Tool{
+			GenerateBookExpenseTool(categories, enableRoast),
+		},
+		// 强制模型思考是否需要调用工具 (Auto 也是常用选项，Required 强制必须调)
+		ToolChoice: openai.ToolChoice{
+			Type: openai.ToolTypeFunction,
+			Function: openai.ToolFunction{
+				Name: "book_expense",
+			},
+		},
+		Temperature: 0.1, // 低温有助于 JSON 格式稳定
+		Stream:      true,
 	}
-
-	jsonBody, _ := json.Marshal(reqBody)
-
-	// 2. 创建 HTTP Request
-	req, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewBuffer(jsonBody))
+	stream, err := d.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	outCh := make(chan string, 10)
+	go func() {
+		defer close(outCh)
+		defer stream.Close()
+		for {
+			response, err := stream.Recv()
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				slog.Error("Stream error", "err", err)
+				return
+			}
+			if len(response.Choices) > 0 && len(response.Choices[0].Delta.ToolCalls) > 0 {
+				fragment := response.Choices[0].Delta.ToolCalls[0].Function.Arguments
+				if fragment != "" {
+					outCh <- fragment
+				}
+			}
+		}
+	}()
 
-	// 3. 发送请求
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("api call failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-
-	// 4. 处理 HTTP 错误状态
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("api error (status %d): %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	// 5. 解析外层响应
-	var apiResp chatResponse
-	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to parse api response: %w", err)
-	}
-
-	if len(apiResp.Choices) == 0 {
-		return nil, errors.New("api returned no choices")
-	}
-
-	rawContent := apiResp.Choices[0].Message.Content
-
-	// 6. 清洗数据 (防守型编程)
-	// 虽然开了 json_object，但有时候模型可能会带上 ```json ... ``` 的 Markdown 标记
-	cleanContent := sanitizeJSON(rawContent)
-
-	// 7. 反序列化为领域模型
-	var analysis model.FaceTaxAnalysis
-	if err := json.Unmarshal([]byte(cleanContent), &analysis); err != nil {
-		// Log raw content for debugging here if necessary
-		return nil, fmt.Errorf("failed to parse domain model: %w | raw: %s", err, cleanContent)
-	}
-
-	return &analysis, nil
-}
-
-// sanitizeJSON 去除可能的 Markdown 标记
-func sanitizeJSON(input string) string {
-	input = strings.TrimSpace(input)
-	input = strings.TrimPrefix(input, "```json")
-	input = strings.TrimPrefix(input, "```")
-	input = strings.TrimSuffix(input, "```")
-	return input
+	return outCh, nil
 }

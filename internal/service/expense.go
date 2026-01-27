@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/leon37/FaceTaxLedger/internal/infrastructure/embedding"
 	"github.com/leon37/FaceTaxLedger/internal/repository"
@@ -43,81 +44,93 @@ func NewExpenseService(llmClient llm.Provider, embedder embedding.Provider, repo
 	}
 }
 
-// SubmitExpense 处理一次完整的记账请求
-func (s *ExpenseService) SubmitExpense(ctx context.Context, input ExpenseInput) (*ExpenseResult, error) {
+// StreamExpense 处理一次完整的记账请求
+func (s *ExpenseService) StreamExpense(ctx context.Context, input ExpenseInput) (<-chan string, func(fullJson string) (*model.ExpenseEntity, error), error) {
 	slog.Info("收到记账请求",
 		"uid", input.UserID,
 		"description", input.Description)
 	// 1. RAG 检索：先查历史 (比如查最近相似的 3 条)
 	// 这一步不能报错阻断流程，如果检索失败，就当没有历史
 	var historyContext []repository.MemoryResult
+	var historyLogs []string
 	queryVector, err := s.embedder.GetVector(ctx, input.Description)
 	if err != nil {
 		slog.Error("Embed failed: %v\n", err)
-		return nil, err
+		return nil, nil, err
 	}
 	if similarLogs, err := s.memoryRepo.SearchSimilar(ctx, input.UserID, 3, queryVector); err == nil {
 		historyContext = similarLogs
 	} else {
 		// 记录日志但不报错
 		slog.Error("RAG Search failed: %v\n", err)
-		return nil, err
+		return nil, nil, err
 	}
 
-	prompt := fmt.Sprintf("用户当前消费描述: %s", input.Description)
+	for _, log := range historyContext {
+		// 格式化： "2024-01-20 [游戏娱乐] Steam购买黑神话"
+		// 包含分类信息至关重要，因为这是给 LLM 抄作业的答案
+		formatted := fmt.Sprintf("%s [%s] %s",
+			formatTimeAgo(log.Timestamp),
+			log.Category,
+			log.Content, // 或者 log.Description
+		)
+		historyLogs = append(historyLogs, formatted)
+	}
 
-	if len(historyContext) > 0 {
-		prompt += fmt.Sprintf("\n\n【用户相关历史消费（参考这些黑历史来吐槽）】：\n")
-		for i, h := range historyContext {
-			timeStr := formatTimeAgo(h.Timestamp)
-			prompt += fmt.Sprintf("%d. [%s] %s\n", i+1, timeStr, h.Content)
+	preDefinedCategories := model.PredefinedCategories
+	enableRoast := true
+	// TODO: 添加用户自定义目录，读取用户是否开启毒舌的设定
+	streamChan, err := s.llmClient.AnalyzeExpense(ctx, input.Description, preDefinedCategories, historyLogs, enableRoast)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	commitFunc := func(fullJSON string) (*model.ExpenseEntity, error) {
+		var analysis model.FaceTaxAnalysis
+		if err := json.Unmarshal([]byte(fullJSON), &analysis); err != nil {
+			return nil, err
 		}
-		prompt += "\n请结合历史行为，如果发现用户在短时间内（如几天内）重复此类消费，请加大力度嘲讽。"
-	}
 
-	analysis, err := s.llmClient.AnalyzeExpense(ctx, prompt)
-	if err != nil {
-		return nil, err
-	}
+		// 强行清洗 comment
+		if !enableRoast {
+			analysis.Comment = ""
+		}
 
-	expenseTime, err := time.Parse("2006-01-02 15:04:05", analysis.Date)
-	if err != nil {
-		expenseTime = time.Now() // 解析失败就兜底用当前时间
-	}
-
-	entity := &model.ExpenseEntity{
-		UserID:    input.UserID,
-		Amount:    analysis.Amount,
-		Comment:   analysis.Comment,
-		Category:  analysis.Category,
-		CreatedAt: expenseTime,
-		Note:      analysis.Note,
-	}
-	if err := s.repo.Create(ctx, entity); err != nil {
-		return nil, err
-	}
-
-	// 5. 【异步】存入记忆 (Fire and Forget)
-	// 不要让用户等待 Embedding 的过程，开个协程去存
-	go func() {
-		// 创建一个新的 context，因为外面的 ctx 可能会在请求结束时取消
-		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		vector, err := s.embedder.GetVector(bgCtx, input.Description)
+		expenseTime, err := time.Parse("2006-01-02 15:04:05", analysis.Date)
 		if err != nil {
-			slog.Error("Failed to embed vector", "error", err)
+			expenseTime = time.Now() // 解析失败就兜底用当前时间
 		}
-		if err := s.memoryRepo.SaveMemory(bgCtx, input.UserID, entity.ID, input.Description, vector); err != nil {
-			slog.Error("Failed to save memory", "error", err)
+		// 实体转换 & 落库
+		entity := &model.ExpenseEntity{
+			UserID:    input.UserID,
+			Amount:    analysis.Amount,
+			Category:  analysis.Category,
+			Note:      analysis.Note,
+			CreatedAt: expenseTime,
+			Comment:   analysis.Comment,
 		}
-	}()
 
-	return &ExpenseResult{
-		ExpenseID: fmt.Sprintf("%d", entity.ID), // ID 已经是数据库自增生成的了
-		Analysis:  analysis,
-		SavedAt:   entity.CreatedAt,
-	}, nil
+		if err := s.repo.Create(ctx, entity); err != nil {
+			return nil, err
+		}
+		go func() {
+			// 创建一个新的 context，因为外面的 ctx 可能会在请求结束时取消
+			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			vector, err := s.embedder.GetVector(bgCtx, input.Description)
+			if err != nil {
+				slog.Error("Failed to embed vector", "error", err)
+			}
+			if err := s.memoryRepo.SaveMemory(bgCtx, input.UserID, entity.ID, input.Description, analysis.Category, vector); err != nil {
+				slog.Error("Failed to save memory", "error", err)
+			}
+		}()
+
+		return entity, nil
+	}
+
+	return streamChan, commitFunc, nil
 }
 
 func formatTimeAgo(timestamp int64) string {
@@ -214,7 +227,7 @@ func (s *ExpenseService) UpdateExpense(ctx context.Context, userID string, expen
 		}
 
 		// 3. 覆盖保存 (Qdrant 的 Upsert 会自动覆盖旧数据)
-		if err := s.memoryRepo.SaveMemory(context.Background(), userID, uint(expenseID), newContent, vec); err != nil {
+		if err := s.memoryRepo.SaveMemory(context.Background(), userID, uint(expenseID), newContent, existing.Category, vec); err != nil {
 			slog.Error("Qdrant 更新记忆失败", "error", err)
 		} else {
 			slog.Info("Qdrant 记忆已同步更新", "id", expenseID)

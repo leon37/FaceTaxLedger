@@ -60,7 +60,7 @@ func main() {
 	log.Println("配置加载成功")
 
 	// 2. Infra Initialization
-	llmClient := llm.NewDeepSeekClient(conf.DeepSeek.APIKey)
+	llmClient := llm.NewDeepSeekClient(conf.DeepSeek.APIKey, conf.DeepSeek.BaseURL, conf.DeepSeek.Model)
 	db := database.NewMySQLConnection(conf.Database.DSN) // 这里会自动建表
 
 	vecClient, err := vectordb.NewQdrantClient(conf.Qdrant.Host, conf.Qdrant.Port)

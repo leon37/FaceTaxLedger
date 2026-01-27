@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"github.com/gin-gonic/gin"
 	"github.com/leon37/FaceTaxLedger/internal/api/response"
 	"github.com/leon37/FaceTaxLedger/internal/model"
@@ -8,6 +9,7 @@ import (
 	"github.com/leon37/FaceTaxLedger/internal/service"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -45,19 +47,11 @@ type ExpenseAnalyzeResponse struct {
 // @Success 200 {object} response.Response{data=controller.ExpenseAnalyzeResponse}
 // @Router /expenses/analyze [post]
 func (ctrl *ExpenseController) Analyze(c *gin.Context) {
-	// 1. 模拟身份认证 (Temporary Auth)
-	// 在 Phase 4 我们会做真正的 JWT，现在先从 Header 里取 user_id
-	// 客户端请求头需要带上: X-User-ID: 1001
 	userIDStr := c.GetString("userID")
 	if userIDStr == "" {
 		response.Error(c, http.StatusUnauthorized, "缺少 X-User-ID 请求头")
 		return
 	}
-	//userID, err := strconv.ParseInt(userIDStr, 10, 64)
-	//if err != nil {
-	//	response.Error(c, http.StatusBadRequest, "无效的用户 ID")
-	//	return
-	//}
 
 	// 2. 解析 JSON 参数
 	var req ExpenseAnalyzeRequest
@@ -66,6 +60,11 @@ func (ctrl *ExpenseController) Analyze(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	// 2. 设置 SSE Header
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
 
 	slog.Info("收到 API 记账请求", "description", req.Description)
 
@@ -75,24 +74,51 @@ func (ctrl *ExpenseController) Analyze(c *gin.Context) {
 		UserID:      userIDStr,
 		Description: req.Description,
 	}
-	result, err := ctrl.service.SubmitExpense(c.Request.Context(), ei)
+	streamCh, commitFunc, err := ctrl.service.StreamExpense(c.Request.Context(), ei)
 	if err != nil {
 		slog.Error("API 调用业务层失败", "error", err)
 		response.Error(c, http.StatusInternalServerError, "AI 大脑短路了，请稍后再试")
 		return
 	}
+	// 4. 循环读取流，推送到前端，同时在内存拼接
+	var fullJSONBuilder strings.Builder
 
-	// 4. 返回成功响应
-	analysis := result.Analysis
-	rsp := ExpenseAnalyzeResponse{
-		Id:       result.ExpenseID,
-		Comment:  analysis.Comment,
-		Category: analysis.Category,
-		Amount:   analysis.Amount,
-		Date:     analysis.Date,
-		Note:     analysis.Note,
+	// 监听客户端断开 (Gin 的特性)
+	clientGone := c.Writer.CloseNotify()
+	for {
+		select {
+		case <-clientGone:
+			// 客户端断开了，停止处理
+			return
+		case fragment, ok := <-streamCh:
+			if !ok {
+				// 通道关闭，说明流结束了 -> 进入结算阶段
+				goto Finalize
+			}
+
+			// A. 推送给前端 (Raw Fragment)
+			// 前端收到后拼接到 buffer 中尝试解析
+			c.SSEvent("delta", fragment)
+
+			// B. 后端累积
+			fullJSONBuilder.WriteString(fragment)
+
+			// 这里的 Flush 很重要，确保数据立刻发出去
+			c.Writer.Flush()
+		}
 	}
-	response.Success(c, rsp)
+
+Finalize:
+	// 5. 流传输完毕，执行落库逻辑
+	fullJSON := fullJSONBuilder.String()
+	expense, err := commitFunc(fullJSON)
+	if err != nil {
+		c.SSEvent("error", "saving failed: "+err.Error())
+		return
+	}
+
+	finalData, _ := json.Marshal(expense)
+	c.SSEvent("done", string(finalData))
 }
 
 // ListRequest 列表请求参数

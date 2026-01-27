@@ -32,7 +32,7 @@ func (h *ExpenseHandler) HandleSubmitExpense(c *gin.Context) {
 
 	// 2. 调用业务逻辑
 	// Context 必须往下传，以便处理超时或取消
-	result, err := h.svc.SubmitExpense(c.Request.Context(), input)
+	_, _, err := h.svc.StreamExpense(c.Request.Context(), input)
 	if err != nil {
 		// 这里可以根据 error 类型细分状态码，比如 500 还是 400
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

@@ -15,7 +15,7 @@ type QdrantRepository struct {
 
 }
 
-func (r *QdrantRepository) SaveMemory(ctx context.Context, uid string, expenseID uint, description string, vector []float32) error {
+func (r *QdrantRepository) SaveMemory(ctx context.Context, uid string, expenseID uint, description string, category string, vector []float32) error {
 
 	// 2. 构造 Qdrant Point
 
@@ -34,6 +34,7 @@ func (r *QdrantRepository) SaveMemory(ctx context.Context, uid string, expenseID
 				"expense_id":  {Kind: &pb.Value_IntegerValue{IntegerValue: int64(expenseID)}},
 				"description": {Kind: &pb.Value_StringValue{StringValue: description}},
 				"timestamp":   {Kind: &pb.Value_IntegerValue{IntegerValue: time.Now().Unix()}},
+				"category":    {Kind: &pb.Value_StringValue{StringValue: category}},
 			},
 		},
 	}
@@ -94,6 +95,7 @@ func (r *QdrantRepository) SearchSimilar(ctx context.Context, uid string, limit 
 	for _, point := range searchResult.Result {
 		var content string
 		var ts int64
+		var category string
 		// point.Score 是相似度分数，你可以选择过滤掉分数太低的（比如 < 0.7）
 		// 这里暂不设限，全部通过
 
@@ -108,9 +110,13 @@ func (r *QdrantRepository) SearchSimilar(ctx context.Context, uid string, limit 
 		if t, ok := point.Payload["timestamp"]; ok {
 			ts = t.GetIntegerValue()
 		}
+		if cat, ok := point.Payload["category"]; ok {
+			category = cat.GetStringValue()
+		}
 		histories = append(histories, repository.MemoryResult{
 			Content:   content,
 			Timestamp: ts,
+			Category:  category,
 		})
 
 	}
